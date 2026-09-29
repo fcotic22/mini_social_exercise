@@ -94,6 +94,112 @@ REACTION_EMOJIS = {
 }
 REACTION_TYPES = list(REACTION_EMOJIS.keys())
 
+#fIRST
+
+
+def ensure_community_commitment_table():
+    db = sqlite3.connect(DATABASE)
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS community_commitments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL UNIQUE,
+            pledge TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    db.commit()
+    db.close()
+
+
+def user_has_completed_commitment_challenge(user_id):
+    if not user_id:
+        return False
+    user = query_db('SELECT profile FROM users WHERE id = ?', (user_id,), one=True)
+    if not user or not user['profile'] or len(user['profile'].strip()) < 20:
+        return False
+    challenge = query_db(
+        'SELECT 1 FROM community_commitments WHERE user_id = ?',
+        (user_id,),
+        one=True
+    )
+    return challenge is not None
+
+
+def get_community_needs():
+    needs = []
+
+    unanswered = query_db('''
+        SELECT p.id, p.content, u.username, u.id as user_id,
+               (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) AS comment_count
+        FROM posts p
+        JOIN users u ON p.user_id = u.id
+        WHERE (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) = 0
+        ORDER BY p.created_at DESC
+        LIMIT 3
+    ''')
+    for item in unanswered:
+        needs.append({
+            'title': 'Need a reply',
+            'message': f"{item['username']} is waiting for a response to a fresh post.",
+            'link': url_for('post_detail', post_id=item['id']),
+            'type': 'reply',
+        })
+
+    starters = query_db('''
+        SELECT u.id, u.username, u.created_at
+        FROM users u
+        LEFT JOIN posts p ON p.user_id = u.id
+        WHERE p.id IS NULL
+        ORDER BY u.created_at DESC
+        LIMIT 2
+    ''')
+    for person in starters:
+        needs.append({
+            'title': 'Welcome a new member',
+            'message': f"{person['username']} is new to the community and could use a friendly introduction.",
+            'link': url_for('user_profile', username=person['username']),
+            'type': 'welcome',
+        })
+
+    if not needs:
+        needs.append({
+            'title': 'Share a helpful resource',
+            'message': 'The community would benefit from another practical tip, answer, or story.',
+            'link': url_for('feed'),
+            'type': 'share',
+        })
+
+    return needs
+
+
+def get_targeted_contribution_prompt(user_id):
+    if not user_id:
+        return None
+
+    prompt = query_db('''
+        SELECT p.id, p.content, u.username, u.id as user_id
+        FROM posts p
+        JOIN users u ON p.user_id = u.id
+        JOIN follows f ON f.followed_id = p.user_id
+        WHERE f.follower_id = ?
+          AND (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) = 0
+        ORDER BY p.created_at DESC
+        LIMIT 1
+    ''', (user_id,), one=True)
+
+    if not prompt:
+        return None
+
+    return {
+        'post_id': prompt['id'],
+        'username': prompt['username'],
+        'content': prompt['content'],
+        'link': url_for('post_detail', post_id=prompt['id'])
+    }
+
+
+ensure_community_commitment_table()
+
 
 @app.route('/')
 def feed():
@@ -110,7 +216,10 @@ def feed():
     offset = (page - 1) * POSTS_PER_PAGE
 
     current_user_id = session.get('user_id')
+    current_user_is_committed = bool(current_user_id and user_has_completed_commitment_challenge(current_user_id))
     params = []
+    community_needs = get_community_needs()
+    targeted_contribution_prompt = get_targeted_contribution_prompt(current_user_id)
 
     #  2. Build the Query 
     where_clause = ""
@@ -199,7 +308,10 @@ def feed():
                            page=page, # Pass current page number
                            per_page=POSTS_PER_PAGE, # Pass items per page
                            reaction_emojis=REACTION_EMOJIS,
-                           reaction_types=REACTION_TYPES)
+                           reaction_types=REACTION_TYPES,
+                           community_needs=community_needs,
+                           targeted_contribution_prompt=targeted_contribution_prompt,
+                           community_commitment_complete=current_user_is_committed)
 
 @app.route('/posts/new', methods=['POST'])
 def add_post():
@@ -216,6 +328,10 @@ def add_post():
 
     # Pass the user's content through the moderation function
     moderated_content = content
+
+    if not user_has_completed_commitment_challenge(user_id):
+        flash('Please complete the community commitment challenge before posting. It helps the community know you are invested in it.', 'warning')
+        return redirect(url_for('community_commitment'))
 
     # Basic validation to ensure post is not empty
     if moderated_content and moderated_content.strip():
@@ -473,6 +589,44 @@ def login():
             
     return render_template('login.html.j2')
 
+
+@app.route('/community/commitment', methods=['GET', 'POST'])
+def community_commitment():
+    user_id = session.get('user_id')
+    if not user_id:
+        flash('You must be logged in to complete the community commitment challenge.', 'danger')
+        return redirect(url_for('login'))
+
+    user = query_db('SELECT id, username, profile FROM users WHERE id = ?', (user_id,), one=True)
+
+    if request.method == 'POST':
+        profile = (request.form.get('profile') or '').strip()
+        pledge = (request.form.get('pledge') or '').strip()
+
+        if len(profile) < 20:
+            flash('Please write a short profile of at least 20 characters so your commitment to the community is visible.', 'warning')
+            return redirect(url_for('community_commitment'))
+
+        if len(pledge) < 20:
+            flash('Please explain your commitment to the community in a sentence or two.', 'warning')
+            return redirect(url_for('community_commitment'))
+
+        db = get_db()
+        db.execute('UPDATE users SET profile = ? WHERE id = ?', (profile, user_id))
+        db.execute(
+            '''
+            INSERT INTO community_commitments (user_id, pledge) VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET pledge = excluded.pledge, created_at = CURRENT_TIMESTAMP
+            ''',
+            (user_id, pledge)
+        )
+        db.commit()
+        flash('Thank you for completing the community commitment challenge.', 'success')
+        return redirect(url_for('feed'))
+
+    return render_template('community_commitment.html.j2', user=user)
+
+
 @app.route('/logout')
 def logout():
     session.clear()
@@ -491,6 +645,10 @@ def add_comment(post_id):
 
     # Get content from the submitted form
     content = request.form.get('content')
+
+    if not user_has_completed_commitment_challenge(user_id):
+        flash('Please complete the community commitment challenge before commenting. It is a small investment that strengthens the community.', 'warning')
+        return redirect(url_for('community_commitment'))
 
     # Basic validation to ensure comment is not empty
     if content and content.strip():

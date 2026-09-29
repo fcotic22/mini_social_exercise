@@ -47,6 +47,50 @@
   
 </div>
 
+{% if not community_commitment_complete and session.get('user_id') %}
+<div class="col-md-8 mx-auto mb-4">
+  <div class="alert alert-warning d-flex justify-content-between align-items-center mb-0" role="alert">
+    <div>
+      <strong>Community commitment challenge:</strong> complete your profile and pledge before posting or commenting.
+    </div>
+    <a href="{{ url_for('community_commitment') }}" class="btn btn-sm btn-warning">Finish it</a>
+  </div>
+</div>
+{% endif %}
+
+{% if community_needs %}
+<div class="col-md-8 mx-auto mb-4">
+  <div class="card border-primary shadow-sm">
+    <div class="card-body">
+      <h5 class="card-title mb-3">Community needs board</h5>
+      <div class="list-group list-group-flush">
+        {% for need in community_needs %}
+        <a class="list-group-item list-group-item-action" href="{{ need.link }}">
+          <strong>{{ need.title }}</strong><br>
+          <span class="text-muted">{{ need.message }}</span>
+        </a>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% if targeted_contribution_prompt %}
+<div class="col-md-8 mx-auto mb-4">
+  <div class="card border-success shadow-sm">
+    <div class="card-body">
+      <h5 class="card-title mb-2">Direct contribution request for you</h5>
+      <p class="mb-2">
+        <strong>{{ targeted_contribution_prompt.username }}</strong> is waiting for a reply, and you are being asked because you follow this person.
+      </p>
+      <p class="mb-3 text-muted">{{ targeted_contribution_prompt.content[:140] }}{% if targeted_contribution_prompt.content|length > 140 %}...{% endif %}</p>
+      <a href="{{ targeted_contribution_prompt.link }}" class="btn btn-success btn-sm">Answer the request</a>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <div class="col-md-8 mx-auto">
   {% for entry in posts %}
   <div class="card mb-4" id="post-{{ entry.post.id }}">

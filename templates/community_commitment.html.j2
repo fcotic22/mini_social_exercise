@@ -1,0 +1,27 @@
+{% extends "base.html.j2" %}
+{% block content %}
+<div class="col-lg-8 mx-auto">
+  <div class="card shadow-sm border-0">
+    <div class="card-body p-4">
+      <h2 class="mb-3">Community commitment challenge</h2>
+      <p class="text-muted mb-4">
+        This is a small investment that makes the community more meaningful. A short profile and a brief pledge show that you are serious about participating, which aligns with the idea that <strong>entry barriers and community-specific investments increase commitment</strong>.
+      </p>
+
+      <form method="POST" action="{{ url_for('community_commitment') }}">
+        <div class="mb-3">
+          <label for="profile" class="form-label">Tell the community a little about yourself</label>
+          <textarea class="form-control" id="profile" name="profile" rows="4" required>{{ user.profile or '' }}</textarea>
+        </div>
+
+        <div class="mb-3">
+          <label for="pledge" class="form-label">What do you commit to contributing?</label>
+          <textarea class="form-control" id="pledge" name="pledge" rows="3" placeholder="I will share helpful information, respond to questions, and respect other members." required></textarea>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Complete the challenge</button>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}
