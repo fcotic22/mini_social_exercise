@@ -324,25 +324,34 @@ def add_post():
         return redirect(url_for('login'))
 
     # Get content from the submitted form
-    content = request.form.get('content')
-
-    # Pass the user's content through the moderation function
-    moderated_content = content
+    content = (request.form.get('content') or '').strip()
 
     if not user_has_completed_commitment_challenge(user_id):
         flash('Please complete the community commitment challenge before posting. It helps the community know you are invested in it.', 'warning')
         return redirect(url_for('community_commitment'))
 
-    # Basic validation to ensure post is not empty
-    if moderated_content and moderated_content.strip():
-        db = get_db()
-        db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)',
-                   (user_id, moderated_content))
-        db.commit()
-        flash('Your post was successfully created!', 'success')
-    else:
-        # This will catch empty posts or posts that were fully censored
+    if not content:
         flash('Post cannot be empty or was fully censored.', 'warning')
+        return redirect(url_for('feed'))
+
+    moderated_content, score = moderate_content(content)
+    # Let the author revise flagged text before the filtered version is saved.
+    if request.form.get('confirm_moderated') != 'yes' and (moderated_content != content or score > 0):
+        return render_template(
+            'moderation_review.html.j2',
+            original_content=content,
+            moderated_content=moderated_content,
+            content_score=score,
+            item_type='post',
+            submit_url=url_for('add_post'),
+            cancel_url=url_for('feed')
+        )
+
+    db = get_db()
+    db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)',
+               (user_id, moderated_content))
+    db.commit()
+    flash('Your post was successfully created.', 'success')
 
     # Redirect back to the main feed to see the new post
     return redirect(url_for('feed'))
@@ -532,6 +541,7 @@ def signup():
         location = request.form.get('location', '')
         birthdate = request.form.get('birthdate', '')
         profile = request.form.get('profile', '')
+        profile, _ = moderate_content(profile)
 
         hashed_password = generate_password_hash(password)
 
@@ -611,6 +621,7 @@ def community_commitment():
             flash('Please explain your commitment to the community in a sentence or two.', 'warning')
             return redirect(url_for('community_commitment'))
 
+        profile, _ = moderate_content(profile)
         db = get_db()
         db.execute('UPDATE users SET profile = ? WHERE id = ?', (profile, user_id))
         db.execute(
@@ -650,18 +661,31 @@ def add_comment(post_id):
         flash('Please complete the community commitment challenge before commenting. It is a small investment that strengthens the community.', 'warning')
         return redirect(url_for('community_commitment'))
 
-    # Basic validation to ensure comment is not empty
-    if content and content.strip():
-        db = get_db()
-        db.execute('INSERT INTO comments (post_id, user_id, content) VALUES (?, ?, ?)',
-                   (post_id, user_id, content))
-        db.commit()
-        flash('Your comment was added.', 'success')
-    else:
+    content = (content or '').strip()
+    if not content:
         flash('Comment cannot be empty.', 'warning')
+        return redirect(request.referrer or url_for('post_detail', post_id=post_id))
 
-    # Redirect back to the page the user came from (likely the post detail page)
-    return redirect(request.referrer or url_for('post_detail', post_id=post_id))
+    moderated_content, score = moderate_content(content)
+    # Apply the same point-of-action review used for posts before saving a comment.
+    if request.form.get('confirm_moderated') != 'yes' and (moderated_content != content or score > 0):
+        return render_template(
+            'moderation_review.html.j2',
+            original_content=content,
+            moderated_content=moderated_content,
+            content_score=score,
+            item_type='comment',
+            submit_url=url_for('add_comment', post_id=post_id),
+            cancel_url=url_for('post_detail', post_id=post_id)
+        )
+
+    db = get_db()
+    db.execute('INSERT INTO comments (post_id, user_id, content) VALUES (?, ?, ?)',
+               (post_id, user_id, moderated_content))
+    db.commit()
+    flash('Your comment was added.', 'success')
+
+    return redirect(url_for('post_detail', post_id=post_id))
 
 @app.route('/comments/<int:comment_id>/delete', methods=['POST'])
 def delete_comment(comment_id):
@@ -1042,9 +1066,44 @@ def user_risk_analysis(user_id):
         Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
     
-    score = 0
+    user = query_db(
+        'SELECT profile, created_at FROM users WHERE id = ?',
+        (user_id,),
+        one=True
+    )
+    if not user:
+        return 0.0
 
-    return score;
+    _, profile_score = moderate_content(user['profile'] or '')
+
+    post_scores = [
+        moderate_content(row['content'])[1]
+        for row in query_db('SELECT content FROM posts WHERE user_id = ?', (user_id,)) or []
+    ]
+    comment_scores = [
+        moderate_content(row['content'])[1]
+        for row in query_db('SELECT content FROM comments WHERE user_id = ?', (user_id,)) or []
+    ]
+
+    average_post_score = sum(post_scores) / len(post_scores) if post_scores else 0.0
+    average_comment_score = sum(comment_scores) / len(comment_scores) if comment_scores else 0.0
+    # Posts carry triple weight; averages prevent activity volume from inflating risk by itself.
+    content_risk_score = profile_score + (average_post_score * 3) + average_comment_score
+
+    created_at = user['created_at']
+    if isinstance(created_at, str):
+        created_at = datetime.fromisoformat(created_at)
+    if created_at.tzinfo is not None:
+        created_at = created_at.replace(tzinfo=None)
+    account_age_days = (datetime.utcnow() - created_at).days
+
+    # Apply the stricter multiplier to new accounts, then cap the score at the specified maximum.
+    if account_age_days < 7:
+        content_risk_score *= 1.5
+    elif account_age_days < 30:
+        content_risk_score *= 1.2
+
+    return min(5.0, float(content_risk_score))
 
     
 # Assignment 2.1
@@ -1065,9 +1124,44 @@ def moderate_content(content):
     Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
 
+    content = str(content or '')
+
+    # Severe violations remove the whole item and take precedence over all other scoring.
+    for word in TIER1_WORDS:
+        if re.search(r'(?<!\w)' + re.escape(word.strip()) + r'(?!\w)', content, re.IGNORECASE):
+            return '[content removed due to severe violation]', 5.0
+
+    for phrase in TIER2_PHRASES:
+        if re.search(r'(?<!\w)' + re.escape(phrase.strip()) + r'(?!\w)', content, re.IGNORECASE):
+            return '[content removed due to spam/scam policy]', 5.0
+
     moderated_content = content
-    score = 0
-    
+    score = 0.0
+
+    # Mild violations are censored individually so the rest of the message can remain visible.
+    for word in TIER3_WORDS:
+        pattern = re.compile(r'(?<!\w)' + re.escape(word.strip()) + r'(?!\w)', re.IGNORECASE)
+        moderated_content, matches = pattern.subn(lambda match: '*' * len(match.group(0)), moderated_content)
+        score += 2.0 * matches
+
+    url_pattern = re.compile(
+        r'(?i)(?<![@\w])(?:https?://|www\.)[^\s<>()]+|'
+        r'(?<![@\w])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:/[^\s<>()]*)?'
+    )
+
+    def remove_url(match):
+        url = match.group(0)
+        punctuation = url[len(url.rstrip('.,!?;:')):]
+        return '[link removed]' + punctuation
+
+    moderated_content, url_matches = url_pattern.subn(remove_url, moderated_content)
+    score += 2.0 * url_matches
+
+    # Capitalization affects the score only; it does not change the displayed text.
+    letters = [character for character in content if character.isalpha()]
+    if len(letters) > 15 and sum(character.isupper() for character in letters) / len(letters) > 0.70:
+        score += 0.5
+
     return moderated_content, score
 
 # Coding Assignment #3

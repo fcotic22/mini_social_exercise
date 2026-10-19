@@ -1,0 +1,32 @@
+{% extends "base.html.j2" %}
+{% block content %}
+<div class="col-lg-8 mx-auto">
+  <div class="card border-warning shadow-sm">
+    <div class="card-body p-4">
+      <h2 class="mb-3">Review your {{ item_type }}</h2>
+      <div class="alert alert-warning" role="alert">
+        This text may violate the community rules. Review the filtered version or edit your text before submitting.
+        Content risk score: <strong>{{ content_score }}</strong>.
+      </div>
+
+      <h5>Filtered preview</h5>
+      <div class="border rounded p-3 mb-4 text-break">{{ moderated_content }}</div>
+
+      <form method="POST" action="{{ submit_url }}" class="mb-4">
+        <label for="revised-content" class="form-label">Edit your text</label>
+        <textarea class="form-control mb-3" id="revised-content" name="content" rows="5" required>{{ original_content }}</textarea>
+        <button class="btn btn-primary" type="submit" name="review_again" value="yes">Check revised text</button>
+        <a class="btn btn-outline-secondary" href="{{ cancel_url }}">Cancel</a>
+      </form>
+
+      <form method="POST" action="{{ submit_url }}">
+        <input type="hidden" name="content" value="{{ moderated_content }}">
+        <input type="hidden" name="confirm_moderated" value="yes">
+        <button class="btn btn-warning" type="submit">
+          {% if moderated_content == original_content %}Submit as entered{% else %}Submit filtered version{% endif %}
+        </button>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}
